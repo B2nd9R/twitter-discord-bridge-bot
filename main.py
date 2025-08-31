@@ -96,13 +96,14 @@ class TwitterAPI:
                 return None
     
     async def get_recent_tweets(self, user_id: str, max_results: int = 10) -> list:
-        """الحصول على التغريدات الحديثة للمستخدم"""
+        """الحصول على التغريدات الحديثة للمستخدم (بدون الردود)"""
         url = f"{self.base_url}/users/{user_id}/tweets"
         params = {
             "max_results": max_results,
-            "tweet.fields": "created_at,text,public_metrics,attachments",
+            "tweet.fields": "created_at,text,public_metrics,attachments,in_reply_to_user_id",
             "media.fields": "url,type,preview_image_url",
-            "expansions": "attachments.media_keys"
+            "expansions": "attachments.media_keys",
+            "exclude": "replies,retweets"  # استبعاد الردود والريتويت
         }
         
         async with aiohttp.ClientSession() as session:
@@ -110,7 +111,19 @@ class TwitterAPI:
                 async with session.get(url, headers=self.headers, params=params) as response:
                     if response.status == 200:
                         data = await response.json()
-                        return data.get('data', [])
+                        tweets = data.get('data', [])
+                        
+                        # فلترة إضافية للتأكد من استبعاد الردود
+                        filtered_tweets = []
+                        for tweet in tweets:
+                            # التحقق من أن التغريدة ليست رد
+                            if not tweet.get('in_reply_to_user_id'):
+                                # التحقق من أن النص لا يبدأ بـ @
+                                text = tweet.get('text', '')
+                                if not text.startswith('@'):
+                                    filtered_tweets.append(tweet)
+                        
+                        return filtered_tweets
                     else:
                         logger.error(f"خطأ في الحصول على التغريدات: {response.status}")
                         return []
