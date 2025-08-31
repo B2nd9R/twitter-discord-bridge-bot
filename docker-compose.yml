@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  twitter-discord-bot:
+    build: .
+    container_name: twitter-discord-bridge
+    restart: unless-stopped
+    environment:
+      - TWITTER_BEARER_TOKEN=${TWITTER_BEARER_TOKEN}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - TWITTER_USERNAME=${TWITTER_USERNAME}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-300}
+      - MENTION_EVERYONE=${MENTION_EVERYONE:-true}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - bot-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/data/sent_tweets.json') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  bot-network:
+    driver: bridge
+
+volumes:
+  bot-data:
+    driver: local
