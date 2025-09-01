@@ -99,7 +99,7 @@ class TwitterAPI:
                 logger.error(f"خطأ في الاتصال بـ Twitter API: {e}")
                 return None
     
-    async def get_recent_tweets(self, user_id: str, max_results: int = 10) -> tuple[list, dict]:
+    async def get_recent_tweets(self, user_id: str, max_results: int = 3) -> tuple[list, dict]:
         """الحصول على التغريدات الحديثة للمستخدم مع الميديا"""
         url = f"{self.base_url}/users/{user_id}/tweets"
         params = {
@@ -389,7 +389,7 @@ class TwitterDiscordBot:
             return
         
         user_id = self.user_info['id']
-        tweets, media_info = await self.twitter_api.get_recent_tweets(user_id, max_results=10)
+        tweets, media_info = await self.twitter_api.get_recent_tweets(user_id, max_results=3)
         
         # ترتيب التغريدات من الأقدم للأحدث لإرسالها بالتسلسل الصحيح
         tweets.reverse()
