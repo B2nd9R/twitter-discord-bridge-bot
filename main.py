@@ -3,6 +3,8 @@ import aiohttp
 import json
 import logging
 import re
+import signal
+import sys
 from datetime import datetime, timezone
 from typing import Optional, Set, Dict, List
 from pathlib import Path
@@ -135,8 +137,11 @@ class TwitterAPI:
                         continue
                     return None
     
-    async def get_recent_tweets(self, user_id: str, max_results: int = 5) -> tuple[list, dict]:
+    async def get_recent_tweets(self, user_id: str, max_results: int = 10) -> tuple[list, dict]:
         """الحصول على التغريدات الحديثة للمستخدم مع الميديا"""
+        # تصحيح: التأكد من أن max_results بين 5 و 100
+        max_results = max(5, min(max_results, 100))
+        
         url = f"{self.base_url}/users/{user_id}/tweets"
         params = {
             "max_results": max_results,
@@ -424,6 +429,7 @@ class TwitterDiscordBot:
         self.user_info: Optional[Dict] = None
         self.is_running = False
         self.startup_check_done = False
+        self.shutdown_requested = False
     
     async def initialize(self) -> bool:
         """تهيئة البوت"""
@@ -447,8 +453,8 @@ class TwitterDiscordBot:
                 return
         
         user_id = self.user_info['id']
-        # قلل عدد التغريدات لتوفير API calls
-        tweets, media_info = await self.twitter_api.get_recent_tweets(user_id, max_results=3)
+        # استخدام قيمة صحيحة لـ max_results (بين 5-100)
+        tweets, media_info = await self.twitter_api.get_recent_tweets(user_id, max_results=5)
         
         # في أول فحص، تجاهل التغريدات القديمة لتجنب الإرسال المتكرر
         if not self.startup_check_done:
@@ -463,6 +469,9 @@ class TwitterDiscordBot:
         
         new_tweets_count = 0
         for tweet in tweets:
+            if self.shutdown_requested:
+                break
+                
             tweet_id = tweet['id']
             
             if not self.tweet_tracker.is_sent(tweet_id):
@@ -473,7 +482,8 @@ class TwitterDiscordBot:
                     self.tweet_tracker.mark_as_sent(tweet_id)
                     new_tweets_count += 1
                     # انتظار أطول بين الرسائل
-                    await asyncio.sleep(5)
+                    if not self.shutdown_requested:
+                        await asyncio.sleep(5)
                 else:
                     logger.error(f"فشل في إرسال التغريدة {tweet_id}")
         
@@ -540,6 +550,12 @@ class TwitterDiscordBot:
             return f"{num/1000:.1f}K"
         return str(num)
     
+    def shutdown(self):
+        """طلب إيقاف البوت بشكل آمن"""
+        logger.info("تم طلب إيقاف البوت...")
+        self.shutdown_requested = True
+        self.is_running = False
+    
     async def run(self):
         """تشغيل البوت"""
         # محاولة التهيئة مع إعادة المحاولة
@@ -560,23 +576,35 @@ class TwitterDiscordBot:
         self.is_running = True
         logger.info(f"بدء مراقبة @{self.config.twitter_username} كل {self.config.check_interval} ثانية")
         
-        # زيادة فترة الانتظار لتوفير API calls
-        check_interval = max(self.config.check_interval, 600)  # على الأقل 10 دقائق
-        if check_interval != self.config.check_interval:
-            logger.info(f"تم زيادة فترة المراقبة إلى {check_interval} ثانية لتوفير API calls")
+        # استخدام فترة المراقبة من الإعدادات مباشرة
+        check_interval = self.config.check_interval
         
-        while self.is_running:
+        while self.is_running and not self.shutdown_requested:
             try:
                 await self.check_new_tweets()
-                await asyncio.sleep(check_interval)
+                
+                # انتظار بشكل قابل للمقاطعة
+                for _ in range(check_interval):
+                    if self.shutdown_requested:
+                        break
+                    await asyncio.sleep(1)
+                    
+            except asyncio.CancelledError:
+                logger.info("تم إلغاء مهمة البوت")
+                break
             except KeyboardInterrupt:
                 logger.info("تم إيقاف البوت بواسطة المستخدم")
-                await self.send_shutdown_message()
-                self.is_running = False
                 break
             except Exception as e:
                 logger.error(f"خطأ في دورة البوت: {e}")
-                await asyncio.sleep(300)  # انتظار 5 دقائق عند حدوث خطأ
+                # انتظار 5 دقائق عند حدوث خطأ
+                for _ in range(300):
+                    if self.shutdown_requested:
+                        break
+                    await asyncio.sleep(1)
+        
+        # إرسال رسالة إيقاف التشغيل
+        await self.send_shutdown_message()
     
     async def send_shutdown_message(self):
         """إرسال رسالة إيقاف التشغيل"""
@@ -603,6 +631,19 @@ class TwitterDiscordBot:
         except Exception as e:
             logger.error(f"خطأ في إرسال رسالة إيقاف التشغيل: {e}")
 
+# متغير عام للبوت لاستخدامه في signal handler
+bot_instance = None
+
+def signal_handler(signum, frame):
+    """معالج إشارات النظام لإيقاف البوت بشكل آمن"""
+    global bot_instance
+    if bot_instance:
+        logger.info(f"تم استلام إشارة {signum}، جاري إيقاف البوت...")
+        bot_instance.shutdown()
+    else:
+        logger.info("تم طلب إيقاف البوت")
+        sys.exit(0)
+
 def load_config() -> BotConfig:
     """تحميل إعدادات البوت من ملف .env"""
     from config import load_config as _load_config
@@ -610,7 +651,13 @@ def load_config() -> BotConfig:
 
 async def main():
     """الدالة الرئيسية لتشغيل البوت"""
+    global bot_instance
+    
     try:
+        # إعداد معالجات الإشارات
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
         # تحميل الإعدادات
         config = load_config()
         
@@ -619,12 +666,23 @@ async def main():
         logger.info("🤖 بدء تشغيل Twitter-Discord Bridge Bot")
         
         # إنشاء وتشغيل البوت
-        bot = TwitterDiscordBot(config)
-        await bot.run()
+        bot_instance = TwitterDiscordBot(config)
+        await bot_instance.run()
         
+    except KeyboardInterrupt:
+        logger.info("تم إيقاف البوت بواسطة المستخدم (Ctrl+C)")
     except Exception as e:
         logger.error(f"خطأ في تشغيل البوت: {e}")
         raise
+    finally:
+        logger.info("تم إغلاق البوت بنجاح")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 تم إيقاف البوت بواسطة المستخدم")
+        sys.exit(0)
+    except Exception as e:
+        print(f"❌ خطأ في تشغيل البوت: {e}")
+        sys.exit(1)
