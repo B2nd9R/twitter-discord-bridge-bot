@@ -78,6 +78,27 @@ class TwitterAPI:
             "Authorization": f"Bearer {bearer_token}",
             "Content-Type": "application/json"
         }
+        self.rate_limit_reset = None
+    
+    async def handle_rate_limit(self, response_headers: dict = None):
+        """معالجة تجاوز الحد المسموح"""
+        if response_headers:
+            # محاولة الحصول على وقت إعادة التجديد من headers
+            reset_time = response_headers.get('x-rate-limit-reset')
+            if reset_time:
+                try:
+                    reset_timestamp = int(reset_time)
+                    current_time = datetime.now().timestamp()
+                    wait_time = max(reset_timestamp - current_time, 900)  # على الأقل 15 دقيقة
+                    logger.warning(f"سيتم الانتظار {wait_time/60:.1f} دقيقة حتى إعادة التجديد")
+                    await asyncio.sleep(wait_time)
+                    return
+                except (ValueError, TypeError):
+                    pass
+        
+        # إعادة التجديد الافتراضي: 15 دقيقة
+        logger.warning("تجاوز حد API! سيتم الانتظار 15 دقيقة...")
+        await asyncio.sleep(900)
     
     async def get_user_info(self, username: str) -> Optional[Dict]:
         """الحصول على معلومات المستخدم الكاملة"""
@@ -86,20 +107,35 @@ class TwitterAPI:
             "user.fields": "id,name,username,description,profile_image_url,verified,public_metrics"
         }
         
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(url, headers=self.headers, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data['data']
-                    else:
-                        logger.error(f"خطأ في الحصول على معلومات المستخدم: {response.status}")
-                        return None
-            except Exception as e:
-                logger.error(f"خطأ في الاتصال بـ Twitter API: {e}")
-                return None
+        max_retries = 3
+        for attempt in range(max_retries):
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(url, headers=self.headers, params=params) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            return data['data']
+                        elif response.status == 429:
+                            if attempt < max_retries - 1:
+                                logger.warning(f"Rate limit في محاولة {attempt + 1}، سيتم إعادة المحاولة...")
+                                await self.handle_rate_limit(dict(response.headers))
+                                continue
+                            else:
+                                logger.error("تجاوز الحد الأقصى للمحاولات")
+                                return None
+                        else:
+                            logger.error(f"خطأ في الحصول على معلومات المستخدم: {response.status}")
+                            error_text = await response.text()
+                            logger.error(f"تفاصيل الخطأ: {error_text}")
+                            return None
+                except Exception as e:
+                    logger.error(f"خطأ في الاتصال بـ Twitter API: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(30)  # انتظار 30 ثانية قبل إعادة المحاولة
+                        continue
+                    return None
     
-    async def get_recent_tweets(self, user_id: str, max_results: int = 3) -> tuple[list, dict]:
+    async def get_recent_tweets(self, user_id: str, max_results: int = 5) -> tuple[list, dict]:
         """الحصول على التغريدات الحديثة للمستخدم مع الميديا"""
         url = f"{self.base_url}/users/{user_id}/tweets"
         params = {
@@ -110,34 +146,52 @@ class TwitterAPI:
             "exclude": "replies,retweets"
         }
         
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(url, headers=self.headers, params=params) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        tweets = data.get('data', [])
-                        media_info = {}
-                        
-                        # معالجة معلومات الميديا
-                        if 'includes' in data and 'media' in data['includes']:
-                            for media in data['includes']['media']:
-                                media_info[media['media_key']] = media
-                        
-                        # فلترة الردود
-                        filtered_tweets = []
-                        for tweet in tweets:
-                            if not tweet.get('in_reply_to_user_id'):
-                                text = tweet.get('text', '')
-                                if not text.startswith('@'):
-                                    filtered_tweets.append(tweet)
-                        
-                        return filtered_tweets, media_info
-                    else:
-                        logger.error(f"خطأ في الحصول على التغريدات: {response.status}")
-                        return [], {}
-            except Exception as e:
-                logger.error(f"خطأ في الاتصال بـ Twitter API: {e}")
-                return [], {}
+        max_retries = 2
+        for attempt in range(max_retries):
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(url, headers=self.headers, params=params) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            tweets = data.get('data', [])
+                            media_info = {}
+                            
+                            # معالجة معلومات الميديا
+                            if 'includes' in data and 'media' in data['includes']:
+                                for media in data['includes']['media']:
+                                    media_info[media['media_key']] = media
+                            
+                            # فلترة الردود
+                            filtered_tweets = []
+                            for tweet in tweets:
+                                if not tweet.get('in_reply_to_user_id'):
+                                    text = tweet.get('text', '')
+                                    if not text.startswith('@'):
+                                        filtered_tweets.append(tweet)
+                            
+                            return filtered_tweets, media_info
+                            
+                        elif response.status == 429:
+                            if attempt < max_retries - 1:
+                                logger.warning(f"Rate limit عند جلب التغريدات، محاولة {attempt + 1}")
+                                await self.handle_rate_limit(dict(response.headers))
+                                continue
+                            else:
+                                logger.warning("تجاوز حد API للتغريدات، سيتم التجاهل هذه المرة")
+                                return [], {}
+                                
+                        else:
+                            logger.error(f"خطأ في الحصول على التغريدات: {response.status}")
+                            error_text = await response.text()
+                            logger.error(f"تفاصيل الخطأ: {error_text}")
+                            return [], {}
+                            
+                except Exception as e:
+                    logger.error(f"خطأ في الاتصال بـ Twitter API: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(60)  # انتظار دقيقة قبل إعادة المحاولة
+                        continue
+                    return [], {}
 
 class DiscordWebhook:
     """للتعامل مع Discord Webhook"""
@@ -198,7 +252,7 @@ class DiscordWebhook:
         
         # إنشاء الـ embed الأساسي
         embed = {
-            "title": f"🐦 تغريدة جديدة",
+            "title": "🐦 تغريدة جديدة",
             "description": tweet_text[:2000] if tweet_text else "_بدون نص_",
             "url": tweet_url,
             "color": 0x1DA1F2,
@@ -369,6 +423,7 @@ class TwitterDiscordBot:
         self.tweet_tracker = TweetTracker(config.data_dir)
         self.user_info: Optional[Dict] = None
         self.is_running = False
+        self.startup_check_done = False
     
     async def initialize(self) -> bool:
         """تهيئة البوت"""
@@ -378,6 +433,7 @@ class TwitterDiscordBot:
         self.user_info = await self.twitter_api.get_user_info(self.config.twitter_username)
         if not self.user_info:
             logger.error(f"فشل في الحصول على معلومات المستخدم لـ {self.config.twitter_username}")
+            logger.info("سيتم المحاولة مرة أخرى بعد فترة...")
             return False
         
         logger.info(f"تم العثور على المستخدم {self.user_info['name']} (@{self.config.twitter_username})")
@@ -386,10 +442,21 @@ class TwitterDiscordBot:
     async def check_new_tweets(self):
         """فحص التغريدات الجديدة"""
         if not self.user_info:
-            return
+            logger.warning("معلومات المستخدم غير متوفرة، محاولة إعادة التهيئة...")
+            if not await self.initialize():
+                return
         
         user_id = self.user_info['id']
+        # قلل عدد التغريدات لتوفير API calls
         tweets, media_info = await self.twitter_api.get_recent_tweets(user_id, max_results=3)
+        
+        # في أول فحص، تجاهل التغريدات القديمة لتجنب الإرسال المتكرر
+        if not self.startup_check_done:
+            for tweet in tweets:
+                self.tweet_tracker.mark_as_sent(tweet['id'])
+            self.startup_check_done = True
+            logger.info(f"تم تجاهل {len(tweets)} تغريدة قديمة في الفحص الأول")
+            return
         
         # ترتيب التغريدات من الأقدم للأحدث لإرسالها بالتسلسل الصحيح
         tweets.reverse()
@@ -405,13 +472,15 @@ class TwitterDiscordBot:
                 if await self.discord_webhook.send_tweet(tweet, self.config.twitter_username, self.user_info, media_info):
                     self.tweet_tracker.mark_as_sent(tweet_id)
                     new_tweets_count += 1
-                    # انتظار قصير بين الرسائل لتجنب rate limiting
-                    await asyncio.sleep(3)
+                    # انتظار أطول بين الرسائل
+                    await asyncio.sleep(5)
                 else:
                     logger.error(f"فشل في إرسال التغريدة {tweet_id}")
         
         if new_tweets_count > 0:
             logger.info(f"تم إرسال {new_tweets_count} تغريدة جديدة")
+        elif len(tweets) == 0:
+            logger.debug("لا توجد تغريدات جديدة")
     
     async def send_startup_message(self):
         """إرسال رسالة بدء التشغيل"""
@@ -436,6 +505,11 @@ class TwitterDiscordBot:
                     "name": "📊 إحصائيات الحساب",
                     "value": f"👥 {self._format_numbers(self.user_info.get('public_metrics', {}).get('followers_count', 0))} متابع",
                     "inline": True
+                },
+                {
+                    "name": "ℹ️ ملاحظة",
+                    "value": "سيتم تجاهل التغريدات القديمة في الفحص الأول",
+                    "inline": False
                 }
             ],
             "footer": {
@@ -468,9 +542,17 @@ class TwitterDiscordBot:
     
     async def run(self):
         """تشغيل البوت"""
-        if not await self.initialize():
-            logger.error("فشل في تهيئة البوت")
-            return
+        # محاولة التهيئة مع إعادة المحاولة
+        max_init_attempts = 3
+        for attempt in range(max_init_attempts):
+            if await self.initialize():
+                break
+            elif attempt < max_init_attempts - 1:
+                logger.info(f"إعادة محاولة التهيئة ({attempt + 2}/{max_init_attempts}) بعد دقيقتين...")
+                await asyncio.sleep(120)  # انتظار دقيقتين
+            else:
+                logger.error("فشل في تهيئة البوت بعد عدة محاولات")
+                return
         
         # إرسال رسالة بدء التشغيل
         await self.send_startup_message()
@@ -478,10 +560,15 @@ class TwitterDiscordBot:
         self.is_running = True
         logger.info(f"بدء مراقبة @{self.config.twitter_username} كل {self.config.check_interval} ثانية")
         
+        # زيادة فترة الانتظار لتوفير API calls
+        check_interval = max(self.config.check_interval, 600)  # على الأقل 10 دقائق
+        if check_interval != self.config.check_interval:
+            logger.info(f"تم زيادة فترة المراقبة إلى {check_interval} ثانية لتوفير API calls")
+        
         while self.is_running:
             try:
                 await self.check_new_tweets()
-                await asyncio.sleep(self.config.check_interval)
+                await asyncio.sleep(check_interval)
             except KeyboardInterrupt:
                 logger.info("تم إيقاف البوت بواسطة المستخدم")
                 await self.send_shutdown_message()
@@ -489,7 +576,7 @@ class TwitterDiscordBot:
                 break
             except Exception as e:
                 logger.error(f"خطأ في دورة البوت: {e}")
-                await asyncio.sleep(60)  # انتظار دقيقة عند حدوث خطأ
+                await asyncio.sleep(300)  # انتظار 5 دقائق عند حدوث خطأ
     
     async def send_shutdown_message(self):
         """إرسال رسالة إيقاف التشغيل"""
