@@ -1,2 +1,2 @@
+# متطلبات Twitter-Discord Bridge Bot
 aiohttp==3.9.1
-asyncio
