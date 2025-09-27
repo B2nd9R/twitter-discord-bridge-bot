@@ -1,2 +1,4 @@
 # متطلبات Twitter-Discord Bridge Bot
 aiohttp==3.9.1
+fastapi==0.111.1
+uvicorn[standard]==0.24.0
