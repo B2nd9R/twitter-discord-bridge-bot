@@ -8,9 +8,29 @@ import sys
 from datetime import datetime, timezone
 from typing import Optional, Set, Dict, List
 from pathlib import Path
+from fastapi import FastAPI
 
 # استيراد إعدادات البوت
 from config import load_config, BotConfig
+
+# إنشاء تطبيق FastAPI
+app = FastAPI(title="Twitter-Discord Bridge Bot")
+
+@app.get("/")
+async def health_check():
+    """Endpoint بسيط للتحقق من صحة الخدمة"""
+    return {"status": "ok", "bot_running": bot_instance.is_running if bot_instance else False}
+
+@app.on_event("startup")
+async def startup_event():
+    """تشغيل البوت عند بدء السيرفر"""
+    global bot_instance
+    if bot_instance is None:
+        config = load_config()
+        setup_logging(config.log_level, config.data_dir)
+        bot_instance = TwitterDiscordBot(config)
+        # تشغيل البوت في الخلفية
+        asyncio.create_task(bot_instance.run())
 
 # إعداد التسجيل
 def setup_logging(log_level: str = "INFO", data_dir: str = "data"):
@@ -698,8 +718,14 @@ async def main():
         logger.info("تم إغلاق البوت بنجاح")
 
 if __name__ == "__main__":
+    import os
+    import sys
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 8000))  # Render يعطيك Port
+
     try:
-        asyncio.run(main())
+        uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
     except KeyboardInterrupt:
         print("\n👋 تم إيقاف البوت بواسطة المستخدم")
         sys.exit(0)
