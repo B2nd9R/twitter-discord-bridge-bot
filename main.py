@@ -8,7 +8,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Optional, Set, Dict, List
 from pathlib import Path
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
 
 # استيراد إعدادات البوت
 from config import load_config, BotConfig
@@ -24,22 +24,19 @@ async def health_check():
 
 @app.get("/health")
 @app.head("/health")
-async def health_check_endpoint(response: Response):
+async def health_check_endpoint(request: Request):
     """
-    Endpoint لفحص صحة الخدمة.
     GET: يعيد JSON يحتوي على حالة البوت.
     HEAD: يعيد status code فقط.
     """
+    if request.method == "HEAD":
+        return Response(status_code=200)
+
     status_data = {
         "status": "ok",
-        "bot_running": bot_instance.is_running if bot_instance else False,
+        "bot_running": getattr(bot_instance, "is_running", False),
         "timestamp": datetime.utcnow().isoformat()
     }
-    
-    # إذا كان الطلب HEAD، نرسل status code فقط
-    if response.scope["method"] == "HEAD":
-        return Response(status_code=200)
-    
     return status_data
 
 
